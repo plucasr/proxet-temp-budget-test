@@ -1,6 +1,7 @@
 import { and, countDistinct, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { db, schema } from "#/db";
 import { monthKey, monthRange } from "#/lib/budget-period";
+import { getEntitlements } from "#/server/billing.server";
 
 //
 // Monthly category budgets. Server-only — imported by budgets.functions.ts
@@ -38,6 +39,8 @@ export interface BudgetsOverview {
   /** "YYYY-MM" of the month the figures are for. */
   month: string;
   budgets: BudgetStatus[];
+  /** Budgets in use vs the plan's cap; limit null = unlimited (Pro). */
+  usage: { used: number; limit: number | null };
   /** Accounts span more than one currency — amounts are summed as-is. */
   multiCurrency: boolean;
 }
@@ -193,9 +196,12 @@ export async function getBudgetsOverview(
 
   budgets.sort((a, b) => comparePaths(a.categoryPath, b.categoryPath));
 
+  const entitlements = await getEntitlements(userId);
+
   return {
     month: monthKey(today),
     budgets,
+    usage: { used: budgets.length, limit: entitlements.maxBudgets },
     multiCurrency: (currencies?.count ?? 0) > 1,
   };
 }

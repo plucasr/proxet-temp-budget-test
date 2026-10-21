@@ -216,6 +216,7 @@ describe("getBudgetsOverview", () => {
     expect(overview).toEqual({
       month: "2026-10",
       budgets: [],
+      usage: { used: 0, limit: 3 },
       multiCurrency: false,
     });
   });
@@ -379,5 +380,24 @@ describe("getBudgetsOverview", () => {
       currency: "EUR",
     });
     expect((await overviewFor(userId)).multiCurrency).toBe(true);
+  });
+});
+
+describe("getBudgetsOverview usage", () => {
+  it("counts budgets against the free cap and is unlimited on pro", async () => {
+    const { userId, cat, addBudget } = await seedBudgetUser("bo-usage");
+    await addBudget(cat.food, 10_000);
+    await addBudget(cat.transport, 10_000);
+    expect((await overviewFor(userId)).usage).toEqual({ used: 2, limit: 3 });
+
+    await db.insert(schema.subscriptions).values({
+      user_id: userId,
+      plan: "pro",
+      status: "active",
+    });
+    expect((await overviewFor(userId)).usage).toEqual({
+      used: 2,
+      limit: null,
+    });
   });
 });

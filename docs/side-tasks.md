@@ -10,7 +10,7 @@ not) independently of the feature branch.
 | ST-1 | Migration-heavy unit tests time out under load     | Test infra     | Open — decide after the feature                 |
 | ST-2 | Transaction dates shown one day early (UTC offset) | **App bug**    | Fixed on branch `fix/transaction-date-timezone` |
 | ST-3 | Categories "edit" E2E uses an ambiguous locator     | Test bug       | Open — decide after the feature                 |
-| ST-4 | Import E2E specs intermittently miss file chooser  | Test flakiness | Open — decide after the feature                 |
+| ST-4 | Import E2E helper races its own navigation      | Test flakiness | Open — decide after the feature                 |
 
 ---
 
@@ -62,9 +62,16 @@ not) independently of the feature branch.
   pass on re-run (9/9 on repeat). `import-rules.spec.ts › deleting a rule
   does not retroactively recategorize` also intermittently times out waiting
   for the rule row's delete button after the import (11/11 when run alone).
-- **Cause (suspected):** click lands before hydration attaches the label →
-  input association under full-suite load.
-- **Proposed fix:** use `page.getByLabel(...).setInputFiles()` directly on the
-  file input instead of driving the native chooser.
+- **Cause (confirmed from the failure snapshot):** the shared `importCsv`
+  helper "resets" the import wizard by clicking **Dashboard** then **Import**
+  back-to-back without waiting for the Dashboard navigation to land. When the
+  second click wins the race, the router never leaves `/import`, the wizard
+  keeps its previous state, and the page still shows **"Import complete"** —
+  so "Choose File" never appears and the file-chooser wait times out. Pure
+  test timing; worse under load (seen at 3/4 failures even in isolation).
+  Also affects `import-summary.spec.ts`, which uses the same pattern.
+- **Proposed fix:** in the helpers, `await expect(page).toHaveURL("/dashboard")`
+  between the two clicks (or click "Import another file"), and set the file
+  with `setInputFiles` on the file input instead of the native chooser.
 - **Impact on budgets:** none; relevant only because Phase 7 adds an import
   E2E (E7.3) — that test will use `setInputFiles` to avoid the same flake.
