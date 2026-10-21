@@ -59,7 +59,9 @@ not) independently of the feature branch.
 
 - **Symptom:** `import-dedup.spec.ts` / `import-rules.spec.ts` occasionally
   time out at `page.waitForEvent("filechooser")` / clicking "Choose File";
-  pass on re-run (9/9 on repeat).
+  pass on re-run (9/9 on repeat). `import-rules.spec.ts › deleting a rule
+  does not retroactively recategorize` also intermittently times out waiting
+  for the rule row's delete button after the import (11/11 when run alone).
 - **Cause (suspected):** click lands before hydration attaches the label →
   input association under full-suite load.
 - **Proposed fix:** use `page.getByLabel(...).setInputFiles()` directly on the
