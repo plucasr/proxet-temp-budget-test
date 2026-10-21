@@ -43,9 +43,9 @@ not) independently of the feature branch.
   unaffected.
 - **Fix:** format in UTC (`timeZone: "UTC"`), so the wall-clock value is shown
   exactly as stored. Regression E2E runs the browser in a UTC-3 timezone.
-- **Branch:** developed on `fix/transaction-date-timezone` (off `main`) as a
-  standalone commit, then cherry-picked onto `feat/monthly-budgets` so the
-  whole change set is reviewable as one diff against `main`.
+- **Commit:** `fix(transactions): show transaction dates as stored in every
+  timezone` on `feat/monthly-budgets` — a standalone commit, independent of
+  the budgets commits, so it can be reviewed (or reverted) on its own.
 
 ## ST-3 — Categories "edit" E2E uses an ambiguous locator
 
