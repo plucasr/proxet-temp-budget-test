@@ -9,8 +9,13 @@ import {
   sql,
 } from "drizzle-orm";
 import { db, schema } from "#/db";
-import { monthKey, monthRange } from "#/lib/budget-period";
+import { formatMonthLabel, monthKey, monthRange } from "#/lib/budget-period";
+import { formatMinor } from "#/lib/money";
+import { m } from "#/paraglide/messages";
 import { checkBudgetLimit, getEntitlements } from "#/server/billing.server";
+import { sendEmail } from "#/server/email";
+import { env } from "#/server/env";
+import { getLogger } from "#/server/logger";
 import { ownedEntityExists } from "#/server/ownership.server";
 
 //
@@ -353,4 +358,98 @@ export async function deleteBudgetsForCategories(
         inArray(schema.budgets.category_id, categoryIds),
       ),
     );
+}
+
+// --- Over-budget alerts ---
+//
+// Re-evaluated after every write that can raise this month's spending (see
+// the call sites listed in docs/budgets-spec.md, Phase 7). The budget_alerts
+// ledger row is inserted BEFORE the email is sent, with ON CONFLICT DO
+// NOTHING on (user, category, month): only the evaluation that wins the
+// insert sends, so concurrent writes and repeated evaluations produce at
+// most one email per budget per month. If sending fails the row is removed
+// again so a later write retries. Log lines carry ids only.
+
+/**
+ * Send an over-budget email for every budget that is over this month and has
+ * not alerted yet. Returns the number of emails sent.
+ */
+export async function evaluateBudgetAlerts(
+  userId: string,
+  today: Date = new Date(),
+): Promise<number> {
+  // Cheap exit for the common case: most writes come from users without
+  // budgets.
+  const anyBudget = await db
+    .select({ id: schema.budgets.id })
+    .from(schema.budgets)
+    .where(eq(schema.budgets.user_id, userId))
+    .limit(1);
+  if (anyBudget.length === 0) return 0;
+
+  const overview = await getBudgetsOverview(userId, today);
+  const over = overview.budgets.filter((b) => b.overBudget);
+  if (over.length === 0) return 0;
+
+  const [user] = await db
+    .select({ email: schema.users.email })
+    .from(schema.users)
+    .where(eq(schema.users.id, userId))
+    .limit(1);
+  // Legacy accounts without an email address cannot be alerted.
+  if (!user?.email) return 0;
+
+  const log = getLogger();
+  let sent = 0;
+  for (const budget of over) {
+    const [alert] = await db
+      .insert(schema.budget_alerts)
+      .values({
+        id: crypto.randomUUID(),
+        user_id: userId,
+        category_id: budget.categoryId,
+        month: overview.month,
+      })
+      .onConflictDoNothing()
+      .returning({ id: schema.budget_alerts.id });
+    if (!alert) continue; // Already alerted this month.
+
+    const currency = m.analytics_currency();
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: m.email_budget_over_subject({ category: budget.categoryName }),
+        text: m.email_budget_over_body({
+          category: budget.categoryName,
+          spent: `${formatMinor(budget.spent)} ${currency}`,
+          limit: `${formatMinor(budget.limit)} ${currency}`,
+          month: formatMonthLabel(overview.month),
+          url: `${env.email.baseUrl}/budgets`,
+        }),
+      });
+      sent++;
+      log.info({ userId, budgetId: budget.id }, "over-budget alert sent");
+    } catch (error) {
+      log.error(
+        { err: error, userId, budgetId: budget.id },
+        "failed to send over-budget alert — will retry on the next write",
+      );
+      await db
+        .delete(schema.budget_alerts)
+        .where(eq(schema.budget_alerts.id, alert.id));
+    }
+  }
+  return sent;
+}
+
+/**
+ * evaluateBudgetAlerts for write paths: never throws, so an alerting problem
+ * can never fail the user's actual write.
+ */
+export async function safeEvaluateBudgetAlerts(userId: string): Promise<void> {
+  try {
+    await evaluateBudgetAlerts(userId);
+  } catch (error) {
+    getLogger().error({ err: error, userId }, "budget alert evaluation failed");
+  }
 }

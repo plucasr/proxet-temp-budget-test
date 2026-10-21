@@ -6,6 +6,7 @@ import { isEmailVerified, requireUserId } from "#/server/session";
 import { matchRule, type RuleRow } from "#/server/imports.functions";
 import { categorizeDescription, isAIVisible } from "#/server/ai";
 import { checkSpendCap } from "#/server/ai-usage.server";
+import { safeEvaluateBudgetAlerts } from "#/server/budgets.server";
 
 
 const transactionCountsSchema = z.object({
@@ -292,6 +293,10 @@ export const applyRuleToExisting = createServerFn({ method: "POST" })
         );
       updated++;
     }
+    if (updated > 0) {
+      // Moving transactions between categories shifts budget spending.
+      await safeEvaluateBudgetAlerts(userId);
+    }
     return { success: true, updated };
   });
 
@@ -492,5 +497,9 @@ export const reCategorizeTransactions = createServerFn({ method: "POST" })
       await db.insert(schema.categorization_rules).values(aiRulesInsert);
     }
 
+    if (updated > 0) {
+      // Moving transactions between categories shifts budget spending.
+      await safeEvaluateBudgetAlerts(userId);
+    }
     return { updated, aiCategorized, skipped };
   });

@@ -4,6 +4,7 @@ import {
   createBudgetForUser,
   deleteBudgetForUser,
   getBudgetsOverview,
+  safeEvaluateBudgetAlerts,
   updateBudgetForUser,
 } from "#/server/budgets.server";
 import { requireUserId } from "#/server/session";
@@ -47,14 +48,20 @@ export const createBudget = createServerFn({ method: "POST" })
   .inputValidator(createBudgetSchema)
   .handler(async ({ data }) => {
     const userId = await requireUserId();
-    return createBudgetForUser(userId, data);
+    const result = await createBudgetForUser(userId, data);
+    // A new budget may already be over its limit this month.
+    if ("success" in result) await safeEvaluateBudgetAlerts(userId);
+    return result;
   });
 
 export const updateBudget = createServerFn({ method: "POST" })
   .inputValidator(updateBudgetSchema)
   .handler(async ({ data }) => {
     const userId = await requireUserId();
-    return updateBudgetForUser(userId, data);
+    const result = await updateBudgetForUser(userId, data);
+    // Lowering a limit below this month's spending counts as going over.
+    if ("success" in result) await safeEvaluateBudgetAlerts(userId);
+    return result;
   });
 
 export const deleteBudget = createServerFn({ method: "POST" })

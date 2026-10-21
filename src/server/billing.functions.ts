@@ -26,18 +26,20 @@ export interface BillingStatus {
   hasStripeCustomer: boolean;
   entitlements: {
     maxAccounts: number | null;
+    maxBudgets: number | null;
     scansPerMonth: number;
   };
   usage: {
     scansUsed: number;
     accountsUsed: number;
+    budgetsUsed: number;
   };
 }
 
 export const getBillingStatus = createServerFn({ method: "GET" }).handler(
   async (): Promise<BillingStatus> => {
     const userId = await requireUserId();
-    const [entitlements, subscription, scansUsed, accountRows] =
+    const [entitlements, subscription, scansUsed, accountRows, budgetRows] =
       await Promise.all([
         getEntitlements(userId),
         getSubscription(userId),
@@ -46,6 +48,10 @@ export const getBillingStatus = createServerFn({ method: "GET" }).handler(
           .select({ count: count() })
           .from(schema.accounts)
           .where(eq(schema.accounts.user_id, userId)),
+        db
+          .select({ count: count() })
+          .from(schema.budgets)
+          .where(eq(schema.budgets.user_id, userId)),
       ]);
 
     return {
@@ -56,11 +62,13 @@ export const getBillingStatus = createServerFn({ method: "GET" }).handler(
       hasStripeCustomer: Boolean(subscription?.stripe_customer_id),
       entitlements: {
         maxAccounts: entitlements.maxAccounts,
+        maxBudgets: entitlements.maxBudgets,
         scansPerMonth: entitlements.scansPerMonth,
       },
       usage: {
         scansUsed,
         accountsUsed: accountRows[0]?.count ?? 0,
+        budgetsUsed: budgetRows[0]?.count ?? 0,
       },
     };
   },

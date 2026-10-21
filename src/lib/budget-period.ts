@@ -25,3 +25,15 @@ export function monthRange(date: Date): { from: string; toExclusive: string } {
     toExclusive: `${nextYear}-${pad2(nextMonth + 1)}-01`,
   };
 }
+
+/** "2026-10" → "October 2026". Formatted in UTC so the label never shifts
+ * with the viewer's or server's timezone. */
+export function formatMonthLabel(month: string): string {
+  const date = new Date(`${month}-01T00:00:00Z`);
+  if (isNaN(date.getTime())) return month;
+  return date.toLocaleDateString("en", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}

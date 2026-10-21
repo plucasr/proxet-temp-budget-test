@@ -1,14 +1,24 @@
 // @vitest-environment node
 // Required: TanStack Start's import protection mocks server modules in jsdom (client) environment.
 
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { db, schema } from "../src/db/index.ts";
+import { getCapturedEmails, sendEmail } from "#/server/email";
+
+// Wrap the real sender so individual tests can simulate a delivery failure;
+// by default it delegates to the TEST_MODE in-memory capture.
+vi.mock("#/server/email", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("#/server/email")>();
+  return { ...actual, sendEmail: vi.fn(actual.sendEmail) };
+});
 import { monthKey, monthRange } from "../src/lib/budget-period.ts";
 import {
   createBudgetForUser,
   deleteBudgetForUser,
   deleteBudgetsForCategories,
+  evaluateBudgetAlerts,
   getBudgetsOverview,
+  safeEvaluateBudgetAlerts,
   updateBudgetForUser,
 } from "../src/server/budgets.server.ts";
 import {
@@ -171,6 +181,7 @@ async function seedBudgetUser(prefix: string) {
   await db.insert(schema.users).values({
     id: userId,
     username: userId,
+    email: `${userId}@example.com`,
     password_hash: "x",
   });
   await db.insert(schema.categories).values([
@@ -674,5 +685,180 @@ describe("deleteBudgetsForCategories", () => {
 
   it("is a no-op for an empty list", async () => {
     await expect(deleteBudgetsForCategories("anyone", [])).resolves.toBeUndefined();
+  });
+});
+
+// --- Over-budget alerts ---------------------------------------------------------
+
+const budgetEmails = (userId: string) =>
+  getCapturedEmails(`${userId}@example.com`).filter((e) =>
+    e.subject.includes("budget"),
+  );
+
+describe("evaluateBudgetAlerts", () => {
+  it("emails once when a budget goes over", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-over");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.vegetables);
+
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(1);
+    const emails = budgetEmails(userId);
+    expect(emails).toHaveLength(1);
+    expect(emails[0]!.subject).toBe(
+      "You're over your Groceries budget — Finance Tracker",
+    );
+    expect(emails[0]!.text).toContain("125.00 PLN of your 100.00 PLN");
+    expect(emails[0]!.text).toContain("October 2026");
+    expect(emails[0]!.text).toContain("/budgets");
+  });
+
+  it("does not email again in the same month", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-repeat");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+    await evaluateBudgetAlerts(userId, TODAY);
+
+    await addTxn("2026-10-06", -5_000, cat.groceries); // further over
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+    expect(budgetEmails(userId)).toHaveLength(1);
+  });
+
+  it("sends a single email when evaluations run concurrently", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-race");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+
+    const results = await Promise.all([
+      evaluateBudgetAlerts(userId, TODAY),
+      evaluateBudgetAlerts(userId, TODAY),
+      evaluateBudgetAlerts(userId, TODAY),
+    ]);
+    expect(results.reduce((a, b) => a + b, 0)).toBe(1);
+    expect(budgetEmails(userId)).toHaveLength(1);
+  });
+
+  it("emails again when the budget goes over in a later month", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-month");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+    await evaluateBudgetAlerts(userId, TODAY);
+
+    const november = new Date(2026, 10, 10);
+    // November has no spending yet — the reset means nothing to alert.
+    expect(await evaluateBudgetAlerts(userId, november)).toBe(0);
+    await addTxn("2026-11-08", -10_001, cat.groceries);
+    expect(await evaluateBudgetAlerts(userId, november)).toBe(1);
+    expect(budgetEmails(userId)).toHaveLength(2);
+  });
+
+  it("does not re-send after deleting and re-creating the budget", async () => {
+    const { userId, cat, addTxn } = await seedBudgetUser("ba-recreate");
+    const first = await createBudgetForUser(userId, {
+      categoryId: cat.groceries,
+      limitMinor: 10_000,
+    });
+    if (!("success" in first)) throw new Error("expected success");
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+    await evaluateBudgetAlerts(userId, TODAY);
+
+    await deleteBudgetForUser(userId, { id: first.data.id });
+    await createBudgetForUser(userId, {
+      categoryId: cat.groceries,
+      limitMinor: 10_000,
+    });
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+    expect(budgetEmails(userId)).toHaveLength(1);
+  });
+
+  it("emails when the limit is lowered below this month's spending", async () => {
+    const { userId, cat, addTxn } = await seedBudgetUser("ba-lower");
+    const created = await createBudgetForUser(userId, {
+      categoryId: cat.groceries,
+      limitMinor: 50_000,
+    });
+    if (!("success" in created)) throw new Error("expected success");
+    await addTxn("2026-10-05", -20_000, cat.groceries);
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+
+    await updateBudgetForUser(userId, { id: created.data.id, limitMinor: 15_000 });
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(1);
+  });
+
+  it("does not email when spending is exactly at the limit", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-exact");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -10_000, cat.groceries);
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+    expect(budgetEmails(userId)).toHaveLength(0);
+  });
+
+  it("skips users without an email address", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-noemail");
+    await db
+      .update(schema.users)
+      .set({ email: null })
+      .where(eq(schema.users.id, userId));
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+    const alerts = await db
+      .select()
+      .from(schema.budget_alerts)
+      .where(eq(schema.budget_alerts.user_id, userId));
+    // No ledger row either, so adding an email later can still alert.
+    expect(alerts).toHaveLength(0);
+  });
+
+  it("removes the ledger row when sending fails, so the next write retries", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-fail");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+
+    vi.mocked(sendEmail).mockRejectedValueOnce(new Error("provider down"));
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+    const alerts = await db
+      .select()
+      .from(schema.budget_alerts)
+      .where(eq(schema.budget_alerts.user_id, userId));
+    expect(alerts).toHaveLength(0);
+
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(1);
+    expect(budgetEmails(userId)).toHaveLength(1);
+  });
+
+  it("alerts parent and child budgets crossed by one transaction separately", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-nested");
+    await addBudget(cat.food, 10_000);
+    await addBudget(cat.vegetables, 5_000);
+    await addTxn("2026-10-05", -12_000, cat.vegetables);
+
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(2);
+    expect(budgetEmails(userId).map((e) => e.subject).sort()).toEqual([
+      "You're over your Food budget — Finance Tracker",
+      "You're over your Vegetables budget — Finance Tracker",
+    ]);
+  });
+
+  it("does nothing for a user without budgets", async () => {
+    const { userId, cat, addTxn } = await seedBudgetUser("ba-none");
+    await addTxn("2026-10-05", -99_999, cat.groceries);
+    expect(await evaluateBudgetAlerts(userId, TODAY)).toBe(0);
+  });
+});
+
+describe("safeEvaluateBudgetAlerts", () => {
+  it("swallows failures so the caller's write still succeeds", async () => {
+    const { userId, cat, addTxn, addBudget } = await seedBudgetUser("ba-safe");
+    await addBudget(cat.groceries, 10_000);
+    await addTxn("2026-10-05", -12_500, cat.groceries);
+    // Simulate the ledger insert blowing up mid-evaluation.
+    const spy = vi.spyOn(db, "insert").mockImplementationOnce(() => {
+      throw new Error("db down");
+    });
+    try {
+      await expect(safeEvaluateBudgetAlerts(userId)).resolves.toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

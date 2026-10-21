@@ -72,6 +72,11 @@ not) independently of the feature branch.
   so "Choose File" never appears and the file-chooser wait times out. Pure
   test timing; worse under load (seen at 3/4 failures even in isolation).
   Also affects `import-summary.spec.ts`, which uses the same pattern.
+  `recategorize.spec.ts` has a sibling variant: its `importWithInlineAccount`
+  helper clicks the sidebar "Import" link and calls `setInputFiles`
+  immediately, so the upload can land before the page is ready and the
+  mapping step ("Date" combobox) never renders (failed once in the
+  Phase 6–7 full run, 3/3 on re-run).
 - **Proposed fix:** in the helpers, `await expect(page).toHaveURL("/dashboard")`
   between the two clicks (or click "Import another file"), and set the file
   with `setInputFiles` on the file input instead of the native chooser.

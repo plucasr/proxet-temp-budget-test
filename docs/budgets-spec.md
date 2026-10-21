@@ -335,8 +335,16 @@ Note: Playwright starts its own server on :3000 — no dev server may be running
 - `budgets.server.ts` → `evaluateBudgetAlerts(userId, today = new Date())`:
   1. `getBudgetsOverview`; for each `overBudget` budget:
   2. `INSERT INTO budget_alerts (user_id, category_id, month) ON CONFLICT DO NOTHING RETURNING id`.
-  3. Only when a row was inserted, and the user has an email: send the email
-     (fire-and-forget); on send failure delete that alert row (so a later write retries) and log.
+  3. Only when a row was inserted, and the user has an email: send the email; on send failure
+     delete that alert row (so a later write retries) and log.
+  - **Implementation note:** the write paths **await** the evaluation instead of firing and
+    forgetting it. The common path is a few cheap queries (an early exit when the user has no
+    budgets), and the send latency is paid at most once per budget per month. In exchange the alert
+    is committed before the response returns — deterministic for tests and no background work
+    outliving the request.
+  - **Import-protection note:** each `*.functions.ts` call site must actually use the imported
+    `safeEvaluateBudgetAlerts`; an unused import of `#/server/budgets.server` survives into the
+    client graph and TanStack Start's import protection fails the build.
 - `safeEvaluateBudgetAlerts(userId)` wrapper: never throws — an alert failure must not fail the user's write.
 - Email strings: `email_budget_over_subject({ category })`, `email_budget_over_body({ category, spent, limit, month, url })`
   with link to `${APP_BASE_URL}/budgets`.
