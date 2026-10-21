@@ -4,7 +4,19 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { db, schema } from "../src/db/index.ts";
 import { monthKey, monthRange } from "../src/lib/budget-period.ts";
-import { getBudgetsOverview } from "../src/server/budgets.server.ts";
+import {
+  createBudgetForUser,
+  deleteBudgetForUser,
+  getBudgetsOverview,
+  updateBudgetForUser,
+} from "../src/server/budgets.server.ts";
+import {
+  createBudgetSchema,
+  deleteBudgetSchema,
+  MAX_BUDGET_LIMIT_MINOR,
+  updateBudgetSchema,
+} from "../src/server/budgets.functions.ts";
+import { eq } from "drizzle-orm";
 
 // Every test uses its own ids — the in-memory DB is shared across the file.
 
@@ -399,5 +411,200 @@ describe("getBudgetsOverview usage", () => {
       used: 2,
       limit: null,
     });
+  });
+});
+
+// --- Mutations ---------------------------------------------------------------
+
+async function budgetRow(id: string) {
+  const [row] = await db
+    .select()
+    .from(schema.budgets)
+    .where(eq(schema.budgets.id, id));
+  return row;
+}
+
+describe("budget mutations", () => {
+  it("creates a budget owned by the user and lists it", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-create");
+    const result = await createBudgetForUser(userId, {
+      categoryId: cat.groceries,
+      limitMinor: 80_000,
+    });
+    expect(result).toMatchObject({ success: true });
+    if (!("success" in result)) throw new Error("expected success");
+
+    expect(await budgetRow(result.data.id)).toMatchObject({
+      user_id: userId,
+      category_id: cat.groceries,
+      limit_minor: 80_000,
+    });
+    const [listed] = (await overviewFor(userId)).budgets;
+    expect(listed).toMatchObject({ id: result.data.id, limit: 80_000 });
+  });
+
+  it("rejects another user's category as not found", async () => {
+    const { userId } = await seedBudgetUser("bm-foreign");
+    const other = await seedBudgetUser("bm-foreign-other");
+    const result = await createBudgetForUser(userId, {
+      categoryId: other.cat.groceries,
+      limitMinor: 10_000,
+    });
+    expect(result).toMatchObject({ code: "category_not_found" });
+
+    const missing = await createBudgetForUser(userId, {
+      categoryId: "no-such-category",
+      limitMinor: 10_000,
+    });
+    expect(missing).toMatchObject({ code: "category_not_found" });
+  });
+
+  it("rejects a second budget on the same category", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-dup");
+    await createBudgetForUser(userId, { categoryId: cat.food, limitMinor: 1 });
+    const again = await createBudgetForUser(userId, {
+      categoryId: cat.food,
+      limitMinor: 2,
+    });
+    expect(again).toMatchObject({ code: "budget_exists" });
+  });
+
+  it("reports a duplicate when two creates race for one category", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-race");
+    const results = await Promise.all([
+      createBudgetForUser(userId, { categoryId: cat.food, limitMinor: 1 }),
+      createBudgetForUser(userId, { categoryId: cat.food, limitMinor: 2 }),
+    ]);
+    const successes = results.filter((r) => "success" in r);
+    expect(successes).toHaveLength(1);
+    expect(results.find((r) => !("success" in r))).toMatchObject({
+      code: "budget_exists",
+    });
+  });
+
+  it("enforces the free plan cap on create", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-cap");
+    for (const categoryId of [cat.food, cat.groceries, cat.vegetables]) {
+      expect(
+        await createBudgetForUser(userId, { categoryId, limitMinor: 100 }),
+      ).toMatchObject({ success: true });
+    }
+    const fourth = await createBudgetForUser(userId, {
+      categoryId: cat.transport,
+      limitMinor: 100,
+    });
+    expect(fourth).toMatchObject({ code: "budget_limit_reached", limit: 3 });
+  });
+
+  it("updates the limit and bumps updated_at", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-update");
+    const created = await createBudgetForUser(userId, {
+      categoryId: cat.food,
+      limitMinor: 10_000,
+    });
+    if (!("success" in created)) throw new Error("expected success");
+    const before = await budgetRow(created.data.id);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const result = await updateBudgetForUser(userId, {
+      id: created.data.id,
+      limitMinor: 25_000,
+    });
+    expect(result).toMatchObject({ success: true });
+    const after = await budgetRow(created.data.id);
+    expect(after!.limit_minor).toBe(25_000);
+    expect(after!.updated_at.getTime()).toBeGreaterThan(
+      before!.updated_at.getTime(),
+    );
+  });
+
+  it("cannot update another user's budget", async () => {
+    const owner = await seedBudgetUser("bm-update-owner");
+    const intruder = await seedBudgetUser("bm-update-intruder");
+    const created = await createBudgetForUser(owner.userId, {
+      categoryId: owner.cat.food,
+      limitMinor: 10_000,
+    });
+    if (!("success" in created)) throw new Error("expected success");
+
+    const result = await updateBudgetForUser(intruder.userId, {
+      id: created.data.id,
+      limitMinor: 1,
+    });
+    expect(result).toMatchObject({ code: "budget_not_found" });
+    expect((await budgetRow(created.data.id))!.limit_minor).toBe(10_000);
+  });
+
+  it("deletes the budget; another user cannot", async () => {
+    const owner = await seedBudgetUser("bm-delete-owner");
+    const intruder = await seedBudgetUser("bm-delete-intruder");
+    const created = await createBudgetForUser(owner.userId, {
+      categoryId: owner.cat.food,
+      limitMinor: 10_000,
+    });
+    if (!("success" in created)) throw new Error("expected success");
+
+    expect(
+      await deleteBudgetForUser(intruder.userId, { id: created.data.id }),
+    ).toMatchObject({ code: "budget_not_found" });
+    expect(await budgetRow(created.data.id)).toBeDefined();
+
+    expect(
+      await deleteBudgetForUser(owner.userId, { id: created.data.id }),
+    ).toMatchObject({ success: true });
+    expect(await budgetRow(created.data.id)).toBeUndefined();
+    expect(
+      await deleteBudgetForUser(owner.userId, { id: created.data.id }),
+    ).toMatchObject({ code: "budget_not_found" });
+  });
+
+  it("frees a plan slot when a budget is deleted", async () => {
+    const { userId, cat } = await seedBudgetUser("bm-slot");
+    const ids: string[] = [];
+    for (const categoryId of [cat.food, cat.groceries, cat.vegetables]) {
+      const r = await createBudgetForUser(userId, { categoryId, limitMinor: 1 });
+      if ("success" in r) ids.push(r.data.id);
+    }
+    await deleteBudgetForUser(userId, { id: ids[0]! });
+    expect(
+      await createBudgetForUser(userId, {
+        categoryId: cat.transport,
+        limitMinor: 1,
+      }),
+    ).toMatchObject({ success: true });
+  });
+});
+
+describe("budget input validation", () => {
+  it.each([
+    ["zero", 0],
+    ["negative", -500],
+    ["fractional minor units", 10.5],
+    ["above the maximum", MAX_BUDGET_LIMIT_MINOR + 1],
+  ])("rejects a %s limit", (_label, limitMinor) => {
+    expect(
+      createBudgetSchema.safeParse({ categoryId: "c", limitMinor }).success,
+    ).toBe(false);
+    expect(
+      updateBudgetSchema.safeParse({ id: "b", limitMinor }).success,
+    ).toBe(false);
+  });
+
+  it("accepts a positive integer limit up to the maximum", () => {
+    for (const limitMinor of [1, 50_000, MAX_BUDGET_LIMIT_MINOR]) {
+      expect(
+        createBudgetSchema.safeParse({ categoryId: "c", limitMinor }).success,
+      ).toBe(true);
+    }
+  });
+
+  it("requires ids", () => {
+    expect(
+      createBudgetSchema.safeParse({ categoryId: "", limitMinor: 1 }).success,
+    ).toBe(false);
+    expect(deleteBudgetSchema.safeParse({}).success).toBe(false);
+    expect(
+      updateBudgetSchema.safeParse({ limitMinor: 1 }).success,
+    ).toBe(false);
   });
 });

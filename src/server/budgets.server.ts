@@ -1,7 +1,8 @@
 import { and, countDistinct, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
 import { db, schema } from "#/db";
 import { monthKey, monthRange } from "#/lib/budget-period";
-import { getEntitlements } from "#/server/billing.server";
+import { checkBudgetLimit, getEntitlements } from "#/server/billing.server";
+import { ownedEntityExists } from "#/server/ownership.server";
 
 //
 // Monthly category budgets. Server-only — imported by budgets.functions.ts
@@ -204,4 +205,114 @@ export async function getBudgetsOverview(
     usage: { used: budgets.length, limit: entitlements.maxBudgets },
     multiCurrency: (currencies?.count ?? 0) > 1,
   };
+}
+
+// --- Mutations ---
+//
+// Every mutation scopes by user_id in the same query that touches the row,
+// so another user's budget or category is indistinguishable from a missing
+// one. Errors use the app's `{ error, code }` shape; `code` lets the UI pick
+// a localized message.
+
+export type BudgetErrorCode =
+  | "budget_limit_reached"
+  | "budget_exists"
+  | "category_not_found"
+  | "budget_not_found";
+
+export interface BudgetError {
+  error: string;
+  code: BudgetErrorCode;
+  /** Plan cap, set for budget_limit_reached. */
+  limit?: number;
+}
+
+export type BudgetResult = { success: true; data: { id: string } } | BudgetError;
+
+/** Postgres unique_violation, unwrapped from Drizzle's error. */
+function isUniqueViolation(error: unknown): boolean {
+  const err = error as { code?: string; cause?: { code?: string } };
+  return (err.cause?.code ?? err.code) === "23505";
+}
+
+const budgetExists = (): BudgetError => ({
+  error: "This category already has a budget.",
+  code: "budget_exists",
+});
+
+const budgetNotFound = (): BudgetError => ({
+  error: "Budget not found.",
+  code: "budget_not_found",
+});
+
+export async function createBudgetForUser(
+  userId: string,
+  input: { categoryId: string; limitMinor: number },
+): Promise<BudgetResult> {
+  if (!(await ownedEntityExists("category", userId, input.categoryId))) {
+    return { error: "Category not found.", code: "category_not_found" };
+  }
+
+  const existing = await db
+    .select({ id: schema.budgets.id })
+    .from(schema.budgets)
+    .where(
+      and(
+        eq(schema.budgets.user_id, userId),
+        eq(schema.budgets.category_id, input.categoryId),
+      ),
+    )
+    .limit(1);
+  if (existing.length > 0) return budgetExists();
+
+  const limit = await checkBudgetLimit(userId);
+  if (!limit.allowed) {
+    return { error: limit.error, code: limit.code, limit: limit.limit };
+  }
+
+  const id = crypto.randomUUID();
+  try {
+    await db.insert(schema.budgets).values({
+      id,
+      user_id: userId,
+      category_id: input.categoryId,
+      limit_minor: input.limitMinor,
+    });
+  } catch (error) {
+    // Lost a race with a concurrent create for the same category.
+    if (isUniqueViolation(error)) return budgetExists();
+    throw error;
+  }
+  return { success: true, data: { id } };
+}
+
+export async function updateBudgetForUser(
+  userId: string,
+  input: { id: string; limitMinor: number },
+): Promise<BudgetResult> {
+  const updated = await db
+    .update(schema.budgets)
+    .set({ limit_minor: input.limitMinor, updated_at: new Date() })
+    .where(
+      and(eq(schema.budgets.id, input.id), eq(schema.budgets.user_id, userId)),
+    )
+    .returning({ id: schema.budgets.id });
+  if (updated.length === 0) return budgetNotFound();
+  return { success: true, data: { id: input.id } };
+}
+
+/** Removes the budget only. Its alert ledger rows stay, so re-creating the
+ * budget later in the same month cannot send a second email. */
+export async function deleteBudgetForUser(
+  userId: string,
+  input: { id: string },
+): Promise<BudgetResult> {
+  const deleted = await db
+    .delete(schema.budgets)
+    .where(
+      and(eq(schema.budgets.id, input.id), eq(schema.budgets.user_id, userId)),
+    )
+    .returning({ id: schema.budgets.id });
+  if (deleted.length === 0) return budgetNotFound();
+  return { success: true, data: { id: input.id } };
 }
