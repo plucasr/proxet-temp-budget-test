@@ -60,6 +60,12 @@ test.describe("Data export", () => {
     ).toContain("Main");
     expect(files["transactions.csv"]).toBeDefined();
     expect(files["categories.csv"]).toBeDefined();
+    // Budgets are user data too — exported even when the user has none yet.
+    expect(json.budgets).toEqual([]);
+    expect(json.budgetAlerts).toEqual([]);
+    expect(strFromU8(files["budgets.csv"])).toBe(
+      '"id","category","limit","limit_minor","created_at","updated_at"',
+    );
   });
 
   test("rejects unauthenticated export requests", async ({

@@ -353,7 +353,7 @@
   "privacy_updated": "Last updated: 2026-07-11",
   "privacy_intro": "Finance Tracker stores your financial records so you can track your own spending. This policy explains what we store, why, who processes it, and the rights you have over it. We do not sell data or show ads.",
   "privacy_what_title": "What we store",
-  "privacy_what_body": "Your email address and password hash; the accounts, categories, transactions, and categorization rules you create; bank statement rows you import; receipt images you upload and the line items extracted from them; usage metadata for AI receipt scanning (call counts and token usage, never receipt contents); and your subscription status if you pay for Pro.",
+  "privacy_what_body": "Your email address and password hash; the accounts, categories, transactions, categorization rules, and monthly budgets you create, plus a record of which over-budget alert emails we sent you; bank statement rows you import; receipt images you upload and the line items extracted from them; usage metadata for AI receipt scanning (call counts and token usage, never receipt contents); and your subscription status if you pay for Pro.",
   "privacy_why_title": "Why we store it",
   "privacy_why_body": "Solely to provide the service to you: showing your own data back to you, importing statements, scanning receipts, enforcing plan quotas, and billing. We never use your financial data for advertising, profiling, or training AI models.",
   "privacy_ai_title": "AI receipt scanning",

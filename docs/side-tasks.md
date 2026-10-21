@@ -11,6 +11,8 @@ not) independently of the feature branch.
 | ST-2 | Transaction dates shown one day early (UTC offset) | **App bug**    | Fixed on branch `fix/transaction-date-timezone` |
 | ST-3 | Categories "edit" E2E uses an ambiguous locator     | Test bug       | Open — decide after the feature                 |
 | ST-4 | Import E2E helper races its own navigation      | Test flakiness | Open — decide after the feature                 |
+| ST-5 | `ReferenceError: module is not defined` on every vitest run | Test infra noise | **To be verified**                      |
+| ST-6 | `deleteCategory` does not verify ownership of the target id | **Security bug** (IDOR) | Open — recommend fixing                 |
 
 ---
 
@@ -75,3 +77,55 @@ not) independently of the feature branch.
   with `setInputFiles` on the file input instead of the native chooser.
 - **Impact on budgets:** none; relevant only because Phase 7 adds an import
   E2E (E7.3) — that test will use `setInputFiles` to avoid the same flake.
+
+## ST-5 — `ReferenceError: module is not defined` on every vitest run
+
+- **Status:** to be verified — logged, not investigated.
+- **Symptom:** every `vitest run` prints one
+  `ReferenceError: module is not defined` with a stack in
+  `node_modules/.pnpm/react@19.2.5/node_modules/react/index.js:6` evaluated
+  by Vite's `ESModulesEvaluator.runInlinedModule`. No test fails because of
+  it; the run continues and results are unaffected.
+- **Observations so far:**
+  - Present in the untouched baseline (Phase 0 log).
+  - Printed once per vitest invocation, **before** the `RUN` banner — i.e.
+    while vitest/vite boots (config or plugin loading), not inside a test
+    file. Reproduces with any single file (`authorization`, `money`,
+    `budgets`, `db-migrate`).
+  - `react/index.js` is CommonJS (`module.exports = ...`); the stack shows it
+    being run through Vite's ESM module runner, which has no `module`
+    global — React's CJS entry is being inlined instead of externalized.
+- **To verify:** which import pulls React into the module runner at startup
+  (likely a vite plugin in `vite.config.ts` — devtools / router / start —
+  or `tests/setup.ts`), and whether `test.server.deps` / `ssr.noExternal`
+  settings for React should change. Confirm nothing actually depends on the
+  failed evaluation.
+- **Impact on budgets:** none observed.
+
+## ST-6 — `deleteCategory` does not verify ownership of the target id
+
+- **Status:** open — found while wiring budget cleanup into category
+  deletion (Phase 5). **Recommend fixing**; it is a cross-tenant write.
+- **Where:** `src/server/categories.functions.ts` → `deleteCategory`.
+- **Cause:** descendants are collected with a `user_id` filter, but the
+  requested `data.id` itself is appended to `allIdsToDelete` without an
+  ownership check (the `allIdsToDelete.length === 0` "not found" guard can
+  never trigger). Three of the follow-up statements then filter by id only:
+  - `UPDATE receipt_items SET category_id = NULL WHERE category_id IN (…)`
+  - `DELETE FROM categorization_rules WHERE category_id IN (…)`
+  - `DELETE FROM categories WHERE id IN (…)`
+- **Impact:** a signed-in user who knows another user's category UUID can
+  delete that user's categorization rules and un-categorize their receipt
+  items, and delete the category itself when no foreign transactions
+  reference it. UUIDs are not guessable, which limits exploitability, but it
+  breaks the codebase's own rule (`ownership.server.ts`: "any handler taking
+  an entity id must verify user_id ownership"). The handler also isn't
+  wrapped in a transaction, so a failure part-way leaves partial deletes.
+- **Proposed fix:** `ownedEntityExists("category", userId, data.id)` up front
+  returning "Category not found"; add `user_id` to the categories / rules
+  deletes (receipt_items via the user's receipts); wrap the handler in
+  `db.transaction`. Add a cross-tenant unit/E2E test.
+- **Budgets:** the new `deleteBudgetsForCategories` is user-scoped, so it
+  does not widen the hole — a foreign id leaves the victim's budget in place,
+  and its FK then makes the category delete fail.
+

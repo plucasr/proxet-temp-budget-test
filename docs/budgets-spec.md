@@ -321,6 +321,9 @@ Note: Playwright starts its own server on :3000 — no dev server may be running
 - E6.15 Child limit above parent → warning visible.
 - E6.16 Second account with EUR → multi-currency notice visible.
 - E6.17 Billing page shows the budgets usage row.
+- E6.18 Deleting a budgeted category from the Categories page — and deleting its parent — removes the budget
+  from the Budgets page (end-to-end check of the Phase 5 `deleteCategory` wiring, which needs a session
+  and so is not reachable from unit tests).
 
 **Done when:** AC1–AC6 and AC8 demonstrable in the browser; E2E green.
 

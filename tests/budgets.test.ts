@@ -7,6 +7,7 @@ import { monthKey, monthRange } from "../src/lib/budget-period.ts";
 import {
   createBudgetForUser,
   deleteBudgetForUser,
+  deleteBudgetsForCategories,
   getBudgetsOverview,
   updateBudgetForUser,
 } from "../src/server/budgets.server.ts";
@@ -16,7 +17,7 @@ import {
   MAX_BUDGET_LIMIT_MINOR,
   updateBudgetSchema,
 } from "../src/server/budgets.functions.ts";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 // Every test uses its own ids — the in-memory DB is shared across the file.
 
@@ -606,5 +607,72 @@ describe("budget input validation", () => {
     expect(
       updateBudgetSchema.safeParse({ limitMinor: 1 }).success,
     ).toBe(false);
+  });
+});
+
+// --- Category deletion cleanup ------------------------------------------------
+
+describe("deleteBudgetsForCategories", () => {
+  async function addAlert(userId: string, categoryId: string, id: string) {
+    await db.insert(schema.budget_alerts).values({
+      id,
+      user_id: userId,
+      category_id: categoryId,
+      month: "2026-10",
+    });
+  }
+
+  it("removes budgets and alerts so the categories can be deleted", async () => {
+    const { userId, cat, addBudget } = await seedBudgetUser("bc-delete");
+    await addBudget(cat.groceries, 10_000);
+    await addBudget(cat.vegetables, 5_000);
+    await addBudget(cat.transport, 5_000); // survives
+    await addAlert(userId, cat.groceries, "bc-delete-alert");
+
+    // What deleteCategory passes for "delete Groceries": the subtree.
+    const subtree = [cat.vegetables, cat.groceries];
+    await deleteBudgetsForCategories(userId, subtree);
+    // The category delete that follows must not hit a foreign-key error.
+    await db
+      .delete(schema.categories)
+      .where(inArray(schema.categories.id, subtree));
+
+    const budgets = (await overviewFor(userId)).budgets;
+    expect(budgets.map((b) => b.categoryId)).toEqual([cat.transport]);
+    const alerts = await db
+      .select()
+      .from(schema.budget_alerts)
+      .where(eq(schema.budget_alerts.user_id, userId));
+    expect(alerts).toHaveLength(0);
+  });
+
+  it("without cleanup, deleting a budgeted category is blocked by the FK", async () => {
+    const { cat, addBudget } = await seedBudgetUser("bc-fk");
+    await addBudget(cat.transport, 10_000);
+    const code = await pgErrorCode(
+      db.delete(schema.categories).where(eq(schema.categories.id, cat.transport)),
+    );
+    // 23503 = foreign_key_violation
+    expect(code).toBe("23503");
+  });
+
+  it("never touches another user's budgets or alerts", async () => {
+    const victim = await seedBudgetUser("bc-victim");
+    const caller = await seedBudgetUser("bc-caller");
+    await victim.addBudget(victim.cat.food, 10_000);
+    await addAlert(victim.userId, victim.cat.food, "bc-victim-alert");
+
+    await deleteBudgetsForCategories(caller.userId, [victim.cat.food]);
+
+    expect((await overviewFor(victim.userId)).budgets).toHaveLength(1);
+    const alerts = await db
+      .select()
+      .from(schema.budget_alerts)
+      .where(eq(schema.budget_alerts.user_id, victim.userId));
+    expect(alerts).toHaveLength(1);
+  });
+
+  it("is a no-op for an empty list", async () => {
+    await expect(deleteBudgetsForCategories("anyone", [])).resolves.toBeUndefined();
   });
 });

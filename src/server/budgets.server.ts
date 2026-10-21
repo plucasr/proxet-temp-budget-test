@@ -1,4 +1,13 @@
-import { and, countDistinct, eq, gte, isNotNull, lt, sql } from "drizzle-orm";
+import {
+  and,
+  countDistinct,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  lt,
+  sql,
+} from "drizzle-orm";
 import { db, schema } from "#/db";
 import { monthKey, monthRange } from "#/lib/budget-period";
 import { checkBudgetLimit, getEntitlements } from "#/server/billing.server";
@@ -315,4 +324,33 @@ export async function deleteBudgetForUser(
     .returning({ id: schema.budgets.id });
   if (deleted.length === 0) return budgetNotFound();
   return { success: true, data: { id: input.id } };
+}
+
+/**
+ * Remove the user's budgets and alert ledger rows for categories that are
+ * about to be deleted — both reference categories, and there are no cascade
+ * clauses. Scoped by user_id so it can never touch another user's rows.
+ * A budget is not moved when its category's transactions are reassigned.
+ */
+export async function deleteBudgetsForCategories(
+  userId: string,
+  categoryIds: string[],
+): Promise<void> {
+  if (categoryIds.length === 0) return;
+  await db
+    .delete(schema.budget_alerts)
+    .where(
+      and(
+        eq(schema.budget_alerts.user_id, userId),
+        inArray(schema.budget_alerts.category_id, categoryIds),
+      ),
+    );
+  await db
+    .delete(schema.budgets)
+    .where(
+      and(
+        eq(schema.budgets.user_id, userId),
+        inArray(schema.budgets.category_id, categoryIds),
+      ),
+    );
 }
