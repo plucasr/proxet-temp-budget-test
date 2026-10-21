@@ -17,6 +17,8 @@ export interface Entitlements {
   plan: Plan;
   /** null = unlimited. */
   maxAccounts: number | null;
+  /** null = unlimited. */
+  maxBudgets: number | null;
   scansPerMonth: number;
 }
 
@@ -32,12 +34,14 @@ export function entitlementsForPlan(plan: Plan): Entitlements {
     return {
       plan,
       maxAccounts: null,
+      maxBudgets: null,
       scansPerMonth: env.billing.proScansPerMonth,
     };
   }
   return {
     plan: "free",
     maxAccounts: env.billing.freeMaxAccounts,
+    maxBudgets: env.billing.freeMaxBudgets,
     scansPerMonth: env.ai.freeScansPerMonth,
   };
 }
@@ -103,6 +107,40 @@ export async function checkAccountLimit(
       code: "account_limit_reached",
       limit: entitlements.maxAccounts,
       error: `Free plan is limited to ${entitlements.maxAccounts} accounts. Upgrade to Pro for unlimited accounts.`,
+    };
+  }
+  return { allowed: true };
+}
+
+export type BudgetLimitResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      code: "budget_limit_reached";
+      /** Echoed to the client so the UI can localize the message. */
+      limit: number;
+      error: string;
+    };
+
+/** Gate for budget creation: free plan allows up to freeMaxBudgets. Same
+ * downgrade policy as accounts — budgets above the limit keep working
+ * (including their alerts); only creating new ones is blocked. */
+export async function checkBudgetLimit(
+  userId: string,
+  db: Db = defaultDb,
+): Promise<BudgetLimitResult> {
+  const entitlements = await getEntitlements(userId, db);
+  if (entitlements.maxBudgets === null) return { allowed: true };
+  const rows = await db
+    .select({ count: count() })
+    .from(schema.budgets)
+    .where(eq(schema.budgets.user_id, userId));
+  if ((rows[0]?.count ?? 0) >= entitlements.maxBudgets) {
+    return {
+      allowed: false,
+      code: "budget_limit_reached",
+      limit: entitlements.maxBudgets,
+      error: `Free plan is limited to ${entitlements.maxBudgets} budgets. Upgrade to Pro for unlimited budgets.`,
     };
   }
   return { allowed: true };

@@ -86,6 +86,18 @@ async function seedFullUser(userId: string) {
     plan: "free",
     status: "active",
   });
+  await db.insert(schema.budgets).values({
+    id: `${userId}-budget`,
+    user_id: userId,
+    category_id: `${userId}-cat`,
+    limit_minor: 50_000,
+  });
+  await db.insert(schema.budget_alerts).values({
+    id: `${userId}-alert`,
+    user_id: userId,
+    category_id: `${userId}-cat`,
+    month: "2026-07",
+  });
   return { imageKey };
 }
 
@@ -125,6 +137,13 @@ describe("compliance: data export", () => {
     expect(json.receipts[0].image_file).toBe(`receipts/${userId}-rcpt.jpg`);
     expect(json.categorizationRules).toHaveLength(1);
     expect(json.subscription.plan).toBe("free");
+    expect(json.budgets).toHaveLength(1);
+    expect(json.budgets[0]).toMatchObject({
+      category_id: `${userId}-cat`,
+      limit_minor: 50_000,
+    });
+    expect(json.budgetAlerts).toHaveLength(1);
+    expect(json.budgetAlerts[0].month).toBe("2026-07");
 
     const txnCsv = strFromU8(files["transactions.csv"]);
     expect(txnCsv).toContain('"Grocery store"');
@@ -134,6 +153,8 @@ describe("compliance: data export", () => {
     expect(strFromU8(files["accounts.csv"])).toContain('"Checking"');
     expect(strFromU8(files["categories.csv"])).toContain('"Groceries"');
     expect(strFromU8(files["categorization_rules.csv"])).toContain('"grocery"');
+    const budgetsCsv = strFromU8(files["budgets.csv"]);
+    expect(budgetsCsv).toContain('"Groceries","500.00","50000"');
 
     expect(Array.from(files[`receipts/${userId}-rcpt.jpg`])).toEqual([
       0xff, 0xd8, 0xff, 0x42,
@@ -160,11 +181,30 @@ describe("compliance: account hard delete", () => {
       db.select().from(schema.receipt_items).where(eq(schema.receipt_items.receipt_id, `${userId}-rcpt`)),
       db.select().from(schema.ai_usage).where(eq(schema.ai_usage.user_id, userId)),
       db.select().from(schema.subscriptions).where(eq(schema.subscriptions.user_id, userId)),
+      db.select().from(schema.budgets).where(eq(schema.budgets.user_id, userId)),
+      db.select().from(schema.budget_alerts).where(eq(schema.budget_alerts.user_id, userId)),
     ]);
     for (const rows of remaining) {
       expect.soft(rows).toHaveLength(0);
     }
     expect(await storage.get(imageKey)).toBeNull();
+  });
+
+  it("leaves other users' budgets untouched", async () => {
+    const otherId = "delete-test-bystander";
+    await seedFullUser(userId);
+    await seedFullUser(otherId);
+    try {
+      await hardDeleteUser(userId);
+      const [budgets, alerts] = await Promise.all([
+        db.select().from(schema.budgets).where(eq(schema.budgets.user_id, otherId)),
+        db.select().from(schema.budget_alerts).where(eq(schema.budget_alerts.user_id, otherId)),
+      ]);
+      expect(budgets).toHaveLength(1);
+      expect(alerts).toHaveLength(1);
+    } finally {
+      await wipeUser(otherId);
+    }
   });
 });
 

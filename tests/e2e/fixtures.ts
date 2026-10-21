@@ -15,7 +15,7 @@ import { test as base, expect, type Page } from "@playwright/test";
 // Both fixtures hit the same multi-user code path real users would hit;
 // they don't touch any global state, so tests run fully in parallel.
 
-type SignedInUser = { userId: string; username: string };
+type SignedInUser = { userId: string; username: string; email: string };
 type UnauthUser = {
   userId: string;
   username: string;
@@ -71,8 +71,8 @@ const test = base.extend<{
         `/test-create-user failed (${res.status()}). Is NODE_ENV=test on the server?`,
       );
     }
-    const { userId, username } = (await res.json()) as UnauthUser;
-    await use({ userId, username });
+    const { userId, username, email } = (await res.json()) as UnauthUser;
+    await use({ userId, username, email });
   },
   unauthUser: async ({ page }, use) => {
     const res = await page.request.post(

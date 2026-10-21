@@ -6,6 +6,7 @@ import { eq } from "drizzle-orm";
 import { db, schema } from "../src/db/index.ts";
 import {
   checkAccountLimit,
+  checkBudgetLimit,
   entitlementsForPlan,
   getEntitlements,
   getSubscription,
@@ -52,6 +53,10 @@ describe("billing entitlements and webhook processing", () => {
     await db.delete(schema.subscriptions);
     await db.delete(schema.stripe_events);
     await db.delete(schema.ai_usage);
+    await db.delete(schema.budgets).where(eq(schema.budgets.user_id, userId));
+    await db
+      .delete(schema.categories)
+      .where(eq(schema.categories.user_id, userId));
     await db.delete(schema.accounts).where(eq(schema.accounts.user_id, userId));
     await db.delete(schema.users).where(eq(schema.users.id, userId));
   });
@@ -60,11 +65,14 @@ describe("billing entitlements and webhook processing", () => {
     expect(entitlementsForPlan("free")).toEqual({
       plan: "free",
       maxAccounts: env.billing.freeMaxAccounts,
+      maxBudgets: env.billing.freeMaxBudgets,
       scansPerMonth: env.ai.freeScansPerMonth,
     });
+    expect(env.billing.freeMaxBudgets).toBe(3);
     expect(entitlementsForPlan("pro")).toEqual({
       plan: "pro",
       maxAccounts: null,
+      maxBudgets: null,
       scansPerMonth: env.billing.proScansPerMonth,
     });
   });
@@ -107,6 +115,61 @@ describe("billing entitlements and webhook processing", () => {
     // accounts above the free limit stay usable after any downgrade.
     await setSubscription("pro", "active");
     expect((await checkAccountLimit(userId, db)).allowed).toBe(true);
+  });
+
+  /** Give the test user `n` budgets, each on its own category. */
+  async function seedBudgets(n: number) {
+    for (let i = 0; i < n; i++) {
+      await db.insert(schema.categories).values({
+        id: `billing-cat-${i}`,
+        user_id: userId,
+        name: `Category ${i}`,
+      });
+      await db.insert(schema.budgets).values({
+        id: `billing-budget-${i}`,
+        user_id: userId,
+        category_id: `billing-cat-${i}`,
+        limit_minor: 10_000,
+      });
+    }
+  }
+
+  it("allows free budgets up to the limit and blocks the next one", async () => {
+    await seedBudgets(env.billing.freeMaxBudgets - 1);
+    expect((await checkBudgetLimit(userId, db)).allowed).toBe(true);
+
+    await db.delete(schema.budgets).where(eq(schema.budgets.user_id, userId));
+    await db
+      .delete(schema.categories)
+      .where(eq(schema.categories.user_id, userId));
+    await seedBudgets(env.billing.freeMaxBudgets);
+    const blocked = await checkBudgetLimit(userId, db);
+    expect(blocked).toMatchObject({
+      allowed: false,
+      code: "budget_limit_reached",
+      limit: env.billing.freeMaxBudgets,
+    });
+  });
+
+  it("never limits budgets for entitled pro statuses", async () => {
+    await seedBudgets(env.billing.freeMaxBudgets + 2);
+    for (const status of ["active", "trialing", "past_due"]) {
+      await setSubscription("pro", status);
+      expect((await checkBudgetLimit(userId, db)).allowed).toBe(true);
+      await db.delete(schema.subscriptions);
+    }
+  });
+
+  it("keeps budgets above the free limit after a downgrade but blocks new ones", async () => {
+    await seedBudgets(5);
+    await setSubscription("pro", "canceled");
+
+    expect((await checkBudgetLimit(userId, db)).allowed).toBe(false);
+    const remaining = await db
+      .select({ id: schema.budgets.id })
+      .from(schema.budgets)
+      .where(eq(schema.budgets.user_id, userId));
+    expect(remaining).toHaveLength(5);
   });
 
   it("scan quota and usage summary follow the plan", async () => {

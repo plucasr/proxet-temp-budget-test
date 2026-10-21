@@ -2,6 +2,10 @@ import { createServerFn } from "@tanstack/react-start";
 import { eq, and, asc, count, sql, inArray } from "drizzle-orm";
 import { z } from "zod";
 import { db, schema } from "#/db";
+import {
+  deleteBudgetsForCategories,
+  safeEvaluateBudgetAlerts,
+} from "#/server/budgets.server";
 import { requireUserId } from "#/server/session";
 
 
@@ -215,6 +219,9 @@ export const updateCategory = createServerFn({ method: "POST" })
         ),
       );
 
+    // Re-parenting moves this category's spending into another budget.
+    await safeEvaluateBudgetAlerts(userId);
+
     return { success: true };
   });
 
@@ -305,10 +312,18 @@ export const deleteCategory = createServerFn({ method: "POST" })
       .delete(schema.categorization_rules)
       .where(inArray(schema.categorization_rules.category_id, allIdsToDelete));
 
+    // Budgets (and their alert ledger) reference categories
+    await deleteBudgetsForCategories(userId, allIdsToDelete);
+
     // Delete all descendant categories first, then the target
     await db
       .delete(schema.categories)
       .where(inArray(schema.categories.id, allIdsToDelete));
+
+    if (data.reassignToCategoryId) {
+      // Reassigned transactions now count toward the target's budgets.
+      await safeEvaluateBudgetAlerts(userId);
+    }
 
     return { success: true };
   });

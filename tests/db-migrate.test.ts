@@ -23,7 +23,14 @@ describe("startup migrations", () => {
     const names = new Set(
       (result.rows as Array<{ table_name: string }>).map((t) => t.table_name),
     );
-    for (const table of ["users", "accounts", "transactions", "receipts"]) {
+    for (const table of [
+      "users",
+      "accounts",
+      "transactions",
+      "receipts",
+      "budgets",
+      "budget_alerts",
+    ]) {
       expect(names.has(table), table).toBe(true);
     }
 

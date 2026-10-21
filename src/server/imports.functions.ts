@@ -5,6 +5,7 @@ import { db, schema } from "#/db";
 import { isEmailVerified, requireUserId } from "#/server/session";
 import { categorizeDescription, isAIVisible } from "#/server/ai";
 import { checkSpendCap } from "#/server/ai-usage.server";
+import { safeEvaluateBudgetAlerts } from "#/server/budgets.server";
 import { formatMinor, parseAmountToMinor } from "#/lib/money";
 import {
   MAX_IMPORT_FILE_BYTES,
@@ -1108,6 +1109,11 @@ async function* streamConfirmImport(
         };
       }
     }
+  }
+
+  if (insertRows.length > 0) {
+    // Imported rows can push this month's spending over a budget.
+    await safeEvaluateBudgetAlerts(userId);
   }
 
   yield {

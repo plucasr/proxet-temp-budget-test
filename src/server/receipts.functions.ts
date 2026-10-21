@@ -17,6 +17,7 @@ import {
   validateReceiptImage,
 } from "#/lib/upload";
 import { storage, receiptImageKey } from "#/server/storage";
+import { safeEvaluateBudgetAlerts } from "#/server/budgets.server";
 
 
 // --- Helpers ---
@@ -567,6 +568,9 @@ export const saveReceiptAndLink = createServerFn({ method: "POST" })
       }
       transaction = transaction[0];
     }
+
+    // This write can raise this month's spending.
+    await safeEvaluateBudgetAlerts(userId);
 
     return {
       success: true,
