@@ -8,7 +8,7 @@ not) independently of the feature branch.
 | ID   | Issue                                              | Kind           | Status                                          |
 | ---- | -------------------------------------------------- | -------------- | ----------------------------------------------- |
 | ST-1 | Migration-heavy unit tests time out under load     | Test infra     | Open — decide after the feature                 |
-| ST-2 | Transaction dates shown one day early (UTC offset) | **App bug**    | Fixed on branch `fix/transaction-date-timezone` |
+| ST-2 | Transaction dates shown one day early (UTC offset) | **App bug**    | **Fixed** — merged into `feat/monthly-budgets`   |
 | ST-3 | Categories "edit" E2E uses an ambiguous locator     | Test bug       | Open — decide after the feature                 |
 | ST-4 | Import E2E helper races its own navigation      | Test flakiness | Open — decide after the feature                 |
 | ST-5 | `ReferenceError: module is not defined` on every vitest run | Test infra noise | **To be verified**                      |
@@ -43,8 +43,9 @@ not) independently of the feature branch.
   unaffected.
 - **Fix:** format in UTC (`timeZone: "UTC"`), so the wall-clock value is shown
   exactly as stored. Regression E2E runs the browser in a UTC-3 timezone.
-- **Branch:** `fix/transaction-date-timezone` (off `main`, independent of the
-  feature branch).
+- **Branch:** developed on `fix/transaction-date-timezone` (off `main`) as a
+  standalone commit, then cherry-picked onto `feat/monthly-budgets` so the
+  whole change set is reviewable as one diff against `main`.
 
 ## ST-3 — Categories "edit" E2E uses an ambiguous locator
 
