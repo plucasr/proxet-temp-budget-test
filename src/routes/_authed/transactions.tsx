@@ -703,6 +703,9 @@ function toIsoDatetime(dtLocal: string): string {
 
 // Formats an ISO datetime for display in the transaction list.
 // Shows "May 8, 2026 14:30" if time is non-midnight, or "May 8, 2026" if midnight.
+// The stored value is a wall-clock date with no zone: it is parsed as UTC and
+// formatted in UTC so it renders exactly as stored, whatever the viewer's
+// timezone (formatting in local time shifted dates a day back west of UTC).
 function formatTxDate(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso + "Z");
@@ -712,12 +715,14 @@ function formatTxDate(iso: string): string {
     month: "short",
     day: "numeric",
     year: "numeric",
+    timeZone: "UTC",
   });
   if (!hasTime) return datePart;
   const timePart = d.toLocaleTimeString("en", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: "UTC",
   });
   return `${datePart} ${timePart}`;
 }
